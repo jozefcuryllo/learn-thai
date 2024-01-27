@@ -1,10 +1,13 @@
-use rand::Rng;
+use gtk::{prelude::*, Label};
+use gtk::{Application, ApplicationWindow, Button};
+use pango::glib::random_int_range;
 use rodio::{Decoder, OutputStream, Sink};
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
-use futures_util::StreamExt;
-use tokio::time::{Duration, Instant};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 struct Letter {
     letter: String,
@@ -13,6 +16,11 @@ struct Letter {
     example: Option<String>,
     example_meaning: Option<String>,
     consonant: bool,
+}
+
+#[derive(Clone)]
+struct Context {
+    curr_index: usize,
 }
 
 impl fmt::Display for Letter {
@@ -39,42 +47,228 @@ impl fmt::Display for Letter {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    let letters = get_letters();
-    let mut rng = rand::thread_rng();
-    let random_element = letters.get(rng.gen_range(0..letters.len())).unwrap();
-
-    println!("{}", random_element);
-    play_letter(random_element);
-    Ok(())
+fn play(letters_rc: Arc<Mutex<Vec<Letter>>>, current_index: usize) {
+    thread::spawn(move || {
+        let binding = letters_rc.lock().unwrap();
+        let l = &binding.get(current_index).unwrap();
+        l.play_letter();
+    });
 }
 
+fn compose_view(
+    l: &&Letter,
+    label_1: &Label,
+    label_3: &Label,
+    label_4: &Label,
+) -> () {
+    let label_markup_1 = format!(
+        "<span font_desc='{} Normal 40'>{}</span>  <span font_desc='{} Normal 30'>{}</span>",
+        "Noto Looped Thai UI", l.letter, "Arial", l.letter
+    );
+    label_1.set_markup_with_mnemonic(&label_markup_1);
+    label_4.set_markup(&format!("English letter: {}", &l.english_letter));
+    label_4.hide();
 
-fn play_letter(letter: &Letter) -> () {
-    let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    let path = format!(
-        "audio/{}.mp3",
-        if letter.consonant {
-            letter.example.clone().unwrap()  // consonants group always have an example
-        } else {
-            letter.letter.clone()
+    let txt = match &l.example {
+        Some(example) => format!(
+            "<span font_desc='Noto Looped Thai UI Normal'>Example: {}, {}, {}</span>",
+            example.to_string(),
+            l.pronunciation,
+            l.example_meaning.as_ref().unwrap().to_string()
+        ),
+        None => format!("{}", ""),
+    };
+
+    label_3.set_markup(&txt);
+    label_3.hide();
+}
+
+fn build_ui(app: &gtk::Application, shared_state: Arc<Mutex<Context>>) -> ApplicationWindow {
+    let letters = get_letters();
+
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("Learn Thai")
+        .default_width(600)
+        .default_height(400)
+        .build();
+
+    let button_next = Button::with_label("Next");
+    let button_prev = Button::with_label("Previous");
+    let button_random = Button::with_label("Random");
+    let button_show = Button::with_label("Show");
+
+    let v_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    let h_box_letters = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let h_box_show_hide = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let h_box_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+
+    let label_1 = Label::new(Some(""));
+    let label_3 = Label::new(Some(""));
+    label_3.hide();
+    let label_4 = Label::new(Some(""));
+    label_4.hide();
+
+    h_box_letters.pack_start(&label_1, true, true, 0);
+    h_box_letters.set_hexpand(true);
+
+    h_box_show_hide.pack_start(&button_show, true, false, 0);
+    h_box_show_hide.set_hexpand(true);
+
+    h_box_buttons.pack_start(&button_prev, true, false, 0);
+    h_box_buttons.pack_start(&button_next, true, false, 0);
+    h_box_buttons.pack_start(&button_random, true, false, 0);
+    h_box_buttons.set_hexpand(true);
+
+    v_box.pack_start(&h_box_letters, false, false, 0);
+    v_box.pack_start(&label_4, false, false, 0);
+    v_box.pack_start(&label_3, false, false, 0);
+    v_box.pack_start(&h_box_show_hide, false, false, 0);
+    v_box.pack_start(&h_box_buttons, false, false, 0);
+
+    let label_1_rc = Rc::new(label_1);
+    let label_3_rc = Rc::new(label_3);
+    let label_4_rc = Rc::new(label_4);
+    let letters_rc = Arc::new(Mutex::new(letters));
+
+    let letters_rc_1 = letters_rc.clone();
+    let shared_state_clone_1 = Arc::clone(&shared_state);
+    let label_1_rc_1 = label_1_rc.clone();
+    let label_3_rc_1 = label_3_rc.clone();
+    let label_4_rc_1 = label_4_rc.clone();
+    button_next.connect_clicked(move |_| {
+        let mut current_index = shared_state_clone_1.lock().unwrap().curr_index;
+
+        if current_index < letters_rc_1.lock().unwrap().len() - 1 {
+            shared_state_clone_1.lock().unwrap().curr_index += 1;
+            current_index += 1;
         }
+        let binding = letters_rc_1.lock().unwrap();
+        compose_view(
+            &binding.get(current_index).unwrap(),
+            &label_1_rc_1,
+            &label_3_rc_1,
+            &label_4_rc_1,
+        );
+    });
+
+    let letters_rc_2 = letters_rc.clone();
+    let shared_state_clone_2 = Arc::clone(&shared_state);
+    let label_1_rc_2 = label_1_rc.clone();
+    let label_3_rc_2 = label_3_rc.clone();
+    let label_4_rc_2 = label_4_rc.clone();
+    button_prev.connect_clicked(move |_| {
+        let mut current_index = shared_state_clone_2.lock().unwrap().curr_index;
+
+        if current_index > 0 {
+            shared_state_clone_2.lock().unwrap().curr_index -= 1;
+            current_index -= 1;
+        }
+
+        let binding = letters_rc_2.lock().unwrap();
+        compose_view(
+            &binding.get(current_index).unwrap(),
+            &label_1_rc_2,
+            &label_3_rc_2,
+            &label_4_rc_2,
+        );
+    });
+
+    let letters_rc_3 = letters_rc.clone();
+    let shared_state_clone_3 = Arc::clone(&shared_state);
+    let label_1_rc_3 = label_1_rc.clone();
+    let label_3_rc_3 = label_3_rc.clone();
+    let label_4_rc_3 = label_4_rc.clone();
+    button_random.connect_clicked(move |_| {
+        let r = random_int_range(0, letters_rc_3.lock().unwrap().len() as i32);
+        shared_state_clone_3.lock().unwrap().curr_index = r as usize;
+
+        let binding = letters_rc_3.lock().unwrap();
+        compose_view(
+            &binding.get(r as usize).unwrap(),
+            &label_1_rc_3,
+            &label_3_rc_3,
+            &label_4_rc_3,
+        );
+    });
+
+    let letters_rc_4 = letters_rc.clone();
+    let shared_state_clone_4 = Arc::clone(&shared_state);
+    let label_3_rc_4 = label_3_rc.clone();
+    let label_4_rc_4 = label_4_rc.clone();
+    button_show.connect_clicked(move |_| {
+        label_4_rc_4.show();
+        label_3_rc_4.show();
+
+        let letters_rc_2_clone = Arc::clone(&letters_rc_4);
+        play(
+            letters_rc_2_clone,
+            shared_state_clone_4.lock().unwrap().curr_index,
+        );
+    });
+
+    let current_index = 0;
+    let letters_rc_0 = letters_rc.clone();
+    let binding = letters_rc_0.lock().unwrap();
+    let label_1_rc_0 = label_1_rc.clone();
+    let label_3_rc_0 = label_3_rc.clone();
+    let label_4_rc_0 = label_4_rc.clone();
+    compose_view(
+        &binding.get(current_index).unwrap(),
+        &label_1_rc_0,
+        &label_3_rc_0,
+        &label_4_rc_0,
     );
 
-    match File::open(path) {
-        Ok(f) => {
-            let file = BufReader::new(f);
-            let source = Decoder::new(file).unwrap();
-            let sink = Sink::try_new(&stream_handle).unwrap();
+    window.add(&v_box);
 
-            sink.append(source);
-            sink.sleep_until_end();
-        }
-        Err(e) => {
-            println!("Can't open audio file: {}", e)
-        }
-    };
+    window.show_all();
+    label_3_rc_0.hide();
+    label_4_rc_0.hide();
+
+    return window;
+}
+
+fn main() {
+    let application = Application::builder()
+        .application_id("com.example.learn-thai")
+        .build();
+
+    let shared_state = Arc::new(Mutex::new(Context { curr_index: 0 }));
+
+    application.connect_activate(move |app| {
+        build_ui(app, shared_state.clone());
+    });
+
+    application.run();
+}
+
+impl Letter {
+    fn play_letter(&self) {
+        let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+        let path = format!(
+            "audio/{}.mp3",
+            if self.consonant {
+                self.example.clone().unwrap() // consonants group always have an example
+            } else {
+                self.letter.clone()
+            }
+        );
+
+        match File::open(path) {
+            Ok(f) => {
+                let file = BufReader::new(f);
+                let source = Decoder::new(file).unwrap();
+                let sink = Sink::try_new(&stream_handle).unwrap();
+
+                sink.append(source);
+                sink.sleep_until_end();
+            }
+            Err(e) => {
+                println!("Can't open audio file: {}", e)
+            }
+        };
+    }
 }
 
 fn get_letters() -> Vec<Letter> {
